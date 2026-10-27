@@ -1,0 +1,571 @@
+import React, { useState, useEffect } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, GeoJSON, useMap } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
+
+// 1. Custom Vehicle Marker with BMW M4 Logo
+const carIcon = L.divIcon({
+  className: 'custom-car-marker',
+  html: `
+    <div class="car-marker-badge" style="
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #10b981, #047857);
+      border: 2px solid #ffffff;
+      padding: 2px;
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    ">
+      <div style="
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        overflow: hidden;
+        background: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      ">
+        <img src="/bmw-m4.webp" alt="Car" style="
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          transform: scale(1.15);
+        " />
+      </div>
+    </div>
+  `,
+  iconSize: [48, 48],
+  iconAnchor: [24, 24],
+  popupAnchor: [0, -24]
+});
+
+// Map recenter controller
+function MapController({ position }) {
+  const map = useMap();
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      map.invalidateSize();
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [map]);
+
+  useEffect(() => {
+    if (position) {
+      map.panTo(position, { animate: true });
+    }
+  }, [position, map]);
+
+  return null;
+}
+
+const KENYA_BOUNDS = [[-4.8, 33.8], [5.5, 42.0]];
+
+const NAIROBI_PRESETS = {
+  westlands: [-1.2678, 36.8123],
+  karen: [-1.3190, 36.7065],
+  kilimani: [-1.2900, 36.7820],
+  cbd: [-1.286389, 36.817223],
+  langata: [-1.3210, 36.7950],
+  kasarani: [-1.2185, 36.8903],
+  eastleigh: [-1.2757, 36.8507]
+};
+
+// Smart coordinate finder: checks presets first, then falls back to live API search across Kenya
+const getCoordinatesFromInput = async (text) => {
+  const query = text.toLowerCase().trim();
+  
+  for (const [key, coords] of Object.entries(NAIROBI_PRESETS)) {
+    if (query.includes(key)) {
+      return coords;
+    }
+  }
+
+  try {
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(text + ', Kenya')}`);
+    const data = await response.json();
+    if (data && data.length > 0) {
+      return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+    }
+  } catch (err) {
+    console.warn("Live geocoding failed, using default CBD fallback");
+  }
+
+  return NAIROBI_PRESETS.cbd;
+};
+
+// Drivers with exact starting GPS coordinates around Nairobi
+const INITIAL_DRIVERS = [
+  {
+    id: 1,
+    name: 'Mathew Mutisya',
+    rating: 4.9,
+    experience: '6 Years Experience',
+    phone: '+254 707 717 389',
+    carClasses: ['Automatic', 'Manual', '4x4 / SUVs'],
+    photo: 'https://i.postimg.cc/LXsW3fRQ/Whats-App-Image-2026-05-22-at-1-05-10-PM.jpg',
+    baseCoords: [-1.2700, 36.8000]
+  },
+  {
+    id: 2,
+    name: 'Amina Wangari',
+    rating: 5.0,
+    experience: '8 Years Experience',
+    phone: '+254 722 987 654',
+    carClasses: ['Luxury Sedans', 'Automatic', 'Electric'],
+    photo: 'https://i.postimg.cc/SQPvhJ70/Image-gm64q8gm64q8gm64.jpg',
+    baseCoords: [-1.2920, 36.7750]
+  },
+  {
+    id: 3,
+    name: 'Juma Mwangi',
+    rating: 4.8,
+    experience: '5 Years Experience',
+    phone: '+254 733 456 789',
+    carClasses: ['Manual', '4x4 / SUVs', 'Hybrid'],
+    photo: 'https://i.postimg.cc/QMN2MvBt/Image-rrg7derrg7derrg7.jpg',
+    baseCoords: [-1.2800, 36.8300]
+  }
+];
+
+// Helper formula to calculate straight-line distance in KM between two coordinates
+const calculateDistanceKm = (lat1, lon1, lat2, lon2) => {
+  const R = 6371; 
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return (R * c).toFixed(1);
+};
+
+export default function App() {
+  const [pickup, setPickup] = useState('');
+  const [destination, setDestination] = useState('');
+  const [step, setStep] = useState(1); // 1: Route, 2: Choose Driver, 3: Live Tracking, 4: Payment & Rating
+  
+  const [pickupCoords, setPickupCoords] = useState(NAIROBI_PRESETS.westlands);
+  const [destinationCoords, setDestinationCoords] = useState(NAIROBI_PRESETS.karen);
+  const [driversWithDistance, setDriversWithDistance] = useState([]);
+  const [selectedDriver, setSelectedDriver] = useState(null);
+  const [activeRideId, setActiveRideId] = useState(null);
+  const [countyData, setCountyData] = useState(null);
+
+  const [routeCoordinates, setRouteCoordinates] = useState([NAIROBI_PRESETS.westlands, NAIROBI_PRESETS.karen]);
+  const [driverPosition, setDriverPosition] = useState(NAIROBI_PRESETS.westlands);
+  const [tripDistanceKm, setTripDistanceKm] = useState(12.4);
+  const [tripFareKes, setTripFareKes] = useState(950);
+  const [etaMinutes, setEtaMinutes] = useState(6);
+  const [paymentMethod, setPaymentMethod] = useState('mpesa');
+  const [userRating, setUserRating] = useState(5);
+  const [ratingSubmitted, setRatingSubmitted] = useState(false);
+
+  useEffect(() => {
+    fetch('https://raw.githubusercontent.com/wmgeolab/geoBoundaries/9469f09/releaseData/gbOpen/KEN/ADM1/geoBoundaries-KEN-ADM1.geojson')
+      .then((res) => res.json())
+      .then((data) => setCountyData(data))
+      .catch((err) => console.error('County boundary error:', err));
+  }, []);
+
+  const fetchRealRouteAndDrivers = async (e) => {
+    e.preventDefault();
+    if (!pickup || !destination) {
+      alert('Please enter both your car location and destination.');
+      return;
+    }
+
+    const startCoords = await getCoordinatesFromInput(pickup);
+    const endCoords = await getCoordinatesFromInput(destination);
+    setPickupCoords(startCoords);
+    setDestinationCoords(endCoords);
+
+    // Calculate individual exact driver coordinates and distance to pickup point
+    const evaluatedDrivers = INITIAL_DRIVERS.map((driver) => {
+      const distToUser = calculateDistanceKm(
+        driver.baseCoords[0],
+        driver.baseCoords[1],
+        startCoords[0],
+        startCoords[1]
+      );
+      return {
+        ...driver,
+        distanceFromUser: parseFloat(distToUser),
+        etaArrival: Math.max(2, Math.round(distToUser * 2.5))
+      };
+    }).sort((a, b) => a.distanceFromUser - b.distanceFromUser);
+
+    setDriversWithDistance(evaluatedDrivers);
+
+    // Fetch full OSRM road route
+    try {
+      const url = `https://router.project-osrm.org/route/v1/driving/${startCoords[1]},${startCoords[0]};${endCoords[1]},${endCoords[0]}?overview=full&geometries=geojson`;
+      const res = await fetch(url);
+      const data = await res.json();
+
+      if (data.routes && data.routes.length > 0) {
+        const roadPath = data.routes[0].geometry.coordinates.map((coord) => [coord[1], coord[0]]);
+        const distanceMeters = data.routes[0].distance || 10000;
+        const distanceKm = (distanceMeters / 1000).toFixed(1);
+        const calculatedFare = Math.round(350 + distanceKm * 75);
+
+        setRouteCoordinates(roadPath);
+        setDriverPosition(startCoords);
+        setTripDistanceKm(distanceKm);
+        setTripFareKes(calculatedFare);
+      }
+    } catch (err) {
+      console.warn('Routing fallback used');
+    }
+
+    setStep(2);
+  };
+
+  const handleSelectDriver = (driver) => {
+    setSelectedDriver(driver);
+    setDriverPosition(driver.baseCoords);
+    setEtaMinutes(driver.etaArrival);
+    setActiveRideId('SAFE_DRIVE_' + Math.floor(100000 + Math.random() * 900000));
+    setStep(3);
+  };
+
+  // Simulate vehicle traveling along the route during step 3, reaching destination triggers Step 4
+  useEffect(() => {
+    let interval;
+    if (step === 3 && routeCoordinates.length > 0) {
+      let routeIndex = 0;
+      interval = setInterval(() => {
+        if (routeIndex < routeCoordinates.length) {
+          setDriverPosition(routeCoordinates[routeIndex]);
+          routeIndex++;
+        } else {
+          clearInterval(interval);
+          setStep(4); // Trip completed -> Prompt payment & rating
+        }
+      }, 1500);
+    }
+    return () => clearInterval(interval);
+  }, [step, routeCoordinates]);
+
+  const handleReset = () => {
+    setStep(1);
+    setSelectedDriver(null);
+    setPickup('');
+    setDestination('');
+    setRatingSubmitted(false);
+    setUserRating(5);
+    setDriverPosition(NAIROBI_PRESETS.westlands);
+  };
+
+  return (
+    <div className="relative w-screen h-screen overflow-hidden bg-gray-950 font-sans text-white">
+      
+      {/* 1. BOLT / UBER STYLE MAP CONTAINER */}
+      <div className="absolute inset-0 z-0 w-full h-full">
+        <MapContainer 
+          center={driverPosition} 
+          zoom={13} 
+          minZoom={6}
+          maxZoom={18}
+          maxBounds={KENYA_BOUNDS}
+          maxBoundsViscosity={1.0}
+          style={{ height: '100%', width: '100%', backgroundColor: '#090d16' }}
+          zoomControl={false}
+        >
+          <MapController position={driverPosition} />
+
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            className="map-tiles-dark"
+          />
+
+          {countyData && (
+            <GeoJSON 
+              data={countyData} 
+              style={{ color: '#10b981', weight: 1.5, fillOpacity: 0.02 }}
+            />
+          )}
+
+          {/* Trackable Route Lines */}
+          <Polyline positions={routeCoordinates} color="#047857" weight={10} opacity={0.5} />
+          <Polyline positions={routeCoordinates} color="#10b981" weight={5} opacity={0.95} />
+
+          {/* Pickup & Destination Markers */}
+          <Marker position={pickupCoords}>
+            <Popup><div className="text-gray-900 font-bold">📍 Car Pickup Location</div></Popup>
+          </Marker>
+          <Marker position={destinationCoords}>
+            <Popup><div className="text-gray-900 font-bold">🏁 Destination Drop-off</div></Popup>
+          </Marker>
+
+          {/* Live Driver Tracking Marker */}
+          <Marker position={driverPosition} icon={carIcon}>
+            <Popup>
+              <div className="text-gray-900 font-sans">
+                <strong>🚗 {selectedDriver ? selectedDriver.name : 'Designated Driver'}</strong>
+                <p className="text-xs mt-1">Active on road network</p>
+              </div>
+            </Popup>
+          </Marker>
+        </MapContainer>
+      </div>
+
+      <style>{`
+        .map-tiles-dark {
+          filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.4) !important;
+        }
+      `}</style>
+
+      {/* HEADER */}
+      <header className="absolute top-4 left-4 right-4 z-20 flex justify-between items-center pointer-events-none">
+        <div className="flex items-center space-x-3 bg-gray-900/90 backdrop-blur-md border border-gray-800 px-4 py-2.5 rounded-2xl shadow-2xl pointer-events-auto cursor-pointer" onClick={handleReset}>
+          <div className="w-11 h-11 rounded-xl overflow-hidden border-2 border-emerald-500/40 bg-gray-950 flex items-center justify-center shadow-lg shadow-emerald-500/20">
+            <img src="/bmw-m4.webp" alt="SafeDrive Logo" className="w-full h-full object-cover" />
+          </div>
+          <span className="text-lg font-extrabold tracking-tight text-white">
+            SafeDrive <span className="text-emerald-400">Connect</span>
+          </span>
+        </div>
+
+        <div className="bg-gray-900/90 backdrop-blur-md border border-gray-800 px-3.5 py-2 rounded-2xl shadow-2xl pointer-events-auto flex items-center space-x-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span className="text-xs text-emerald-400 font-semibold">Stage {step} of 4</span>
+        </div>
+      </header>
+
+      {/* FLOATING INTERACTIVE PANEL */}
+      <div className="absolute bottom-6 left-4 right-4 md:left-6 md:right-auto md:w-[440px] z-20 pointer-events-auto">
+        <div className="bg-gray-900/95 border border-gray-800/90 rounded-3xl p-6 shadow-2xl backdrop-blur-2xl space-y-4">
+          
+          {/* STEP 1: Route Setup */}
+          {step === 1 && (
+            <div className="space-y-4">
+              <div>
+                <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20 uppercase tracking-wider">
+                  Step 1: Set Route & Destination
+                </span>
+                <h1 className="text-lg font-black text-white mt-2">Where is your car parked?</h1>
+                <p className="text-gray-400 text-xs">Enter your car location and drop-off destination.</p>
+              </div>
+
+              <form onSubmit={fetchRealRouteAndDrivers} className="space-y-3">
+                <div>
+                  <label className="text-[11px] font-semibold text-gray-400 uppercase">Pickup Location</label>
+                  <input
+                    type="text"
+                    placeholder="e.g., Westlands, Nairobi"
+                    value={pickup}
+                    onChange={(e) => setPickup(e.target.value)}
+                    className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-emerald-500 transition mt-1"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-gray-400 uppercase">Destination</label>
+                  <input
+                    type="text"
+                    placeholder="e.g., Karen Residence, Nairobi"
+                    value={destination}
+                    onChange={(e) => setDestination(e.target.value)}
+                    className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-emerald-500 transition mt-1"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-gray-950 font-extrabold py-3.5 rounded-xl shadow-lg shadow-emerald-500/20 transition hover:opacity-95 mt-1"
+                >
+                  Find Nearby Drivers & Distances →
+                </button>
+              </form>
+            </div>
+          )}
+
+          {/* STEP 2: Driver Selection with Exact Distances & ETAs */}
+          {step === 2 && (
+            <div className="space-y-3">
+              <div className="flex justify-between items-center border-b border-gray-800 pb-2">
+                <div>
+                  <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20 uppercase tracking-wider">
+                    Step 2: Choose Driver
+                  </span>
+                  <h2 className="text-base font-black text-white mt-1">Available Drivers Nearby</h2>
+                  <p className="text-[11px] text-gray-400">Total Distance: {tripDistanceKm} km | Fare: <strong className="text-emerald-400">KES {tripFareKes}</strong></p>
+                </div>
+                <button onClick={() => setStep(1)} className="text-xs text-emerald-400 underline font-semibold">
+                  Back
+                </button>
+              </div>
+
+              <div className="space-y-2.5 max-h-[42vh] overflow-y-auto pr-1">
+                {driversWithDistance.map((driver) => (
+                  <div key={driver.id} className="bg-gray-950 border border-gray-800 rounded-xl p-3 space-y-2.5 hover:border-emerald-500/60 transition">
+                    <div className="flex items-center space-x-3">
+                      <img src={driver.photo} alt={driver.name} className="w-12 h-12 rounded-full object-cover border-2 border-emerald-500/40" />
+                      <div className="flex-1">
+                        <div className="flex justify-between items-start">
+                          <h3 className="font-bold text-white text-sm">{driver.name}</h3>
+                          <span className="bg-emerald-500/10 text-emerald-400 text-xs px-2 py-0.5 rounded font-bold border border-emerald-500/20">
+                            ★ {driver.rating}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-gray-400">{driver.experience}</p>
+                        
+                        {/* Exact Distance & ETA badge */}
+                        <div className="flex justify-between items-center mt-1 bg-gray-900 px-2.5 py-1 rounded-lg border border-gray-800 text-[11px]">
+                          <span className="text-cyan-300">📍 {driver.distanceFromUser} km away</span>
+                          <span className="text-emerald-400 font-mono font-bold">~{driver.etaArrival} mins arrival</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => handleSelectDriver(driver)}
+                      className="w-full bg-emerald-500 hover:bg-emerald-400 text-gray-950 font-bold py-2 rounded-lg text-xs transition shadow-md"
+                    >
+                      Dispatch {driver.name} (KES {tripFareKes})
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* STEP 3: Live Trackable Route Cockpit */}
+          {step === 3 && selectedDriver && (
+            <div className="space-y-3">
+              <div className="border-b border-gray-800 pb-2 flex justify-between items-center">
+                <div>
+                  <span className="text-[10px] uppercase tracking-wider text-emerald-400 font-semibold animate-pulse bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20">
+                    Step 3: Live Tracking Active
+                  </span>
+                  <h2 className="text-base font-black text-white mt-1">{selectedDriver.name} is navigating</h2>
+                </div>
+                <div className="text-right">
+                  <span className="text-xs font-mono bg-emerald-500/10 text-emerald-400 px-2.5 py-1 rounded-lg border border-emerald-500/20 font-bold">
+                    ~{etaMinutes} mins
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-gray-950 p-3.5 rounded-xl border border-gray-800 flex items-center space-x-3">
+                <img src={selectedDriver.photo} alt={selectedDriver.name} className="w-12 h-12 rounded-full object-cover border-2 border-emerald-500" />
+                <div className="space-y-0.5 text-xs flex-1">
+                  <p className="text-white font-bold">{selectedDriver.name} (★ {selectedDriver.rating})</p>
+                  <p className="text-cyan-400 font-mono text-[11px]">Cell: {selectedDriver.phone}</p>
+                  <p className="text-gray-400 text-[11px]">Route: {tripDistanceKm} km journey</p>
+                </div>
+              </div>
+
+              <div className="bg-gray-950 p-3 rounded-xl border border-gray-800 text-xs space-y-1 font-mono">
+                <div className="flex justify-between text-gray-400">
+                  <span>Session ID:</span>
+                  <span className="text-emerald-400">{activeRideId}</span>
+                </div>
+                <div className="flex justify-between text-gray-400">
+                  <span>Fare:</span>
+                  <span className="text-white font-bold">KES {tripFareKes}</span>
+                </div>
+              </div>
+
+              <button
+                onClick={handleReset}
+                className="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 font-bold py-2.5 rounded-xl transition text-xs"
+              >
+                Cancel Ride Request
+              </button>
+            </div>
+          )}
+
+          {/* STEP 4: End of Destination, Payment Prompt, & Rating Screen */}
+          {step === 4 && selectedDriver && (
+            <div className="space-y-4">
+              <div className="border-b border-gray-800 pb-2">
+                <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20 uppercase tracking-wider">
+                  Step 4: Trip Complete
+                </span>
+                <h2 className="text-lg font-black text-white mt-2">You have arrived safely! 🎉</h2>
+                <p className="text-gray-400 text-xs">Please complete your payment and rate your driver.</p>
+              </div>
+
+              {!ratingSubmitted ? (
+                <div className="space-y-3">
+                  {/* Payment Selection Box */}
+                  <div className="bg-gray-950 p-3.5 rounded-xl border border-gray-800 space-y-2">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-gray-400">Total Fare:</span>
+                      <span className="text-emerald-400 font-bold text-sm">KES {tripFareKes}</span>
+                    </div>
+                    <label className="text-[11px] font-semibold text-gray-400 uppercase block">Choose Payment Method</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button 
+                        type="button" 
+                        onClick={() => setPaymentMethod('mpesa')}
+                        className={`py-2 rounded-lg text-xs font-bold border transition ${paymentMethod === 'mpesa' ? 'bg-emerald-500 text-gray-950 border-emerald-400' : 'bg-gray-900 text-gray-300 border-gray-800'}`}
+                      >
+                        📱 M-Pesa STK Push
+                      </button>
+                      <button 
+                        type="button" 
+                        onClick={() => setPaymentMethod('cash')}
+                        className={`py-2 rounded-lg text-xs font-bold border transition ${paymentMethod === 'cash' ? 'bg-emerald-500 text-gray-950 border-emerald-400' : 'bg-gray-900 text-gray-300 border-gray-800'}`}
+                      >
+                        💵 Cash Payment
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Rating Section */}
+                  <div className="bg-gray-950 p-3.5 rounded-xl border border-gray-800 text-center space-y-2">
+                    <p className="text-xs text-gray-300 font-semibold">Rate your experience with {selectedDriver.name}</p>
+                    <div className="flex justify-center space-x-2 text-xl">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button 
+                          key={star} 
+                          onClick={() => setUserRating(star)}
+                          className={`transition ${userRating >= star ? 'text-amber-400 scale-110' : 'text-gray-600'}`}
+                        >
+                          ★
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => setRatingSubmitted(true)}
+                    className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 text-gray-950 font-extrabold py-3.5 rounded-xl shadow-lg shadow-emerald-500/20 transition hover:opacity-95 text-sm"
+                  >
+                    Confirm Payment & Submit Feedback
+                  </button>
+                </div>
+              ) : (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-2xl p-5 text-center space-y-3">
+                  <div className="w-12 h-12 bg-emerald-500 text-gray-950 rounded-full flex items-center justify-center mx-auto text-xl font-bold shadow-lg shadow-emerald-500/20">
+                    ✓
+                  </div>
+                  <h3 className="text-base font-bold text-white">Thank You for Riding with SafeDrive!</h3>
+                  <p className="text-xs text-gray-300">Payment received successfully via {paymentMethod === 'mpesa' ? 'M-Pesa' : 'Cash'}. Your rating has been recorded.</p>
+                  
+                  <button
+                    onClick={handleReset}
+                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-gray-950 font-extrabold py-3 rounded-xl text-xs transition shadow-md mt-2"
+                  >
+                    Book Another Designated Driver
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+    </div>
+  );
+}
